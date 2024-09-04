@@ -1,17 +1,3 @@
-// const express = require('express');
-// const { adminAuth } = require('../Middleware/authMiddleware');
-
-// const router = express.Router();
-
-// // Example protected admin route
-// router.get('/dashboard', adminAuth, (req, res) => {
-//     res.send('Welcome to the Admin Dashboard');
-// });
-
-// module.exports = router;
-
-
-
 // adminRoute.js
 const express = require('express');
 const AdminController = require('../Controllers/adminController');
