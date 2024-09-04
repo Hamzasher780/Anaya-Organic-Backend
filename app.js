@@ -16,7 +16,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: ["http://127.0.0.1:5500", "https://your-netlify-app.netlify.app"], // Adjust this to your frontend origin
+    origin: ['https://anayaorganic.netlify.app'], // Adjust this to your frontend origin
     credentials: true, // Allows session cookies from the browser to pass through
     methods: ["GET", "POST", "PUT", "DELETE"], // Ensure these methods are allowed
   })
