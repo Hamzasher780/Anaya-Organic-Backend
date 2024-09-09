@@ -1,46 +1,132 @@
-const mongoose = require("mongoose");
-const Order = require("../Models/order");
-const Cart = require("../Models/cart");
-const User = require("../Models/user"); // Assuming you have a User model
-const Product = require("../Models/products"); // Ensure correct capitalization
-const nodemailer = require("nodemailer");
+const multer = require('multer');
+const Order = require('../Models/order');
+const Cart = require('../Models/cart');
+const Product = require('../Models/products');
+const User = require('../Models/user');
+const nodemailer = require('nodemailer');
 
-// Mock payment processing function (only for non-COD payments)
-async function processPayment(totalAmount, paymentDetails) {
-  return new Promise((resolve, reject) => {
-    if (totalAmount > 0) {
-      resolve(true);
-    } else {
-      reject("Payment failed");
+// Multer configuration for handling proof of payment uploads
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, 'uploads/proofs/');
+    },
+    filename: (req, file, cb) => {
+        cb(null, Date.now() + '-' + file.originalname);
     }
-  });
+});
+
+exports.upload = multer({ storage }).single('proofOfPayment');
+
+// Middleware for parsing other form data
+const bodyParser = require('body-parser');
+
+// Create an order
+exports.createOrder = async (req, res) => {
+  try {
+    const { userId, paymentMethod, totalAmount, shippingAddress, buyNowProductId } = req.body;
+    
+    // Check if shippingAddress exists
+    if (!shippingAddress) {
+      return res.status(400).json({ message: 'Shipping address is required.' });
+    }
+
+    let items = [];
+
+    // Handle "Buy Now" scenario
+    if (buyNowProductId) {
+      const product = await Product.findById(buyNowProductId);
+      if (!product) {
+        return res.status(400).json({ message: 'Product not found.' });
+      }
+      if (product.stock <= 0) {
+        return res.status(400).json({ message: `Not enough stock for product: ${product.name}` });
+      }
+      items.push({
+        product: product._id,
+        quantity: 1,
+        price: product.price,
+      });
+    } else {
+      // Handle regular cart checkout
+      const cart = await Cart.findOne({ user: userId }).populate('items.product');
+      if (!cart || cart.items.length === 0) {
+        return res.status(400).json({ message: 'Cart is empty or not found.' });
+      }
+
+      // Stock validation for cart items
+      for (const item of cart.items) {
+        if (item.product.stock < item.quantity) {
+          return res.status(400).json({ message: `Not enough stock for product: ${item.product.name}` });
+        }
+      }
+      items = cart.items.map(item => ({
+        product: item.product._id,
+        quantity: item.quantity,
+        price: item.product.price,
+      }));
+    }
+
+    // Save the order
+    const order = new Order({
+      user: userId,
+      items: items,
+      shippingAddress: shippingAddress, // Parsed as JSON object
+      paymentMethod,
+      totalAmount,
+      status: paymentMethod === 'COD' ? 'Pending' : 'Paid',
+    });
+
+    await order.save();
+
+    // Decrement stock for products
+    for (const item of order.items) {
+      const product = await Product.findById(item.product);
+      product.stock -= item.quantity;
+      await product.save();
+    }
+
+    // Clear the cart if it's a cart checkout
+    if (!buyNowProductId) {
+      await Cart.findOneAndUpdate({ user: userId }, { items: [] });
+    }
+
+    res.status(201).json(order);
+  } catch (err) {
+    console.error('Error creating order:', err.message);
+    res.status(500).json({ message: 'Internal server error.' });
+  }
+};
+
+
+
+// Mock payment processing function for non-COD orders
+async function processPayment(totalAmount) {
+  if (totalAmount <= 0) {
+    throw new Error('Invalid payment amount.');
+  }
+  return true;
 }
 
-// Email notification function
+// Send email confirmation
 async function sendOrderConfirmationEmail(userEmail, order) {
-  let transporter = nodemailer.createTransport({
-    service: "gmail",
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
     auth: {
       user: process.env.EMAIL_USERNAME,
-      pass: process.env.EMAIL_PASSWORD,
-    },
-  });
-
-  let mailOptions = {
-    from: process.env.EMAIL_USERNAME,
-    to: userEmail,
-    subject: "Order Confirmation",
-    text: `Your order ${order._id} has been placed successfully.\n\nOrder Details:\n- Total Amount: PKR ${order.totalAmount}\n- Shipping Address: ${order.shippingAddress}\n\nThank you for shopping with us!`,
-  };
-
-  transporter.sendMail(mailOptions, (error, info) => {
-    if (error) {
-      console.error("Error sending order confirmation email:", error);
-    } else {
-      console.log("Order confirmation email sent:", info.response);
+      pass: process.env.EMAIL_PASSWORD
     }
   });
+
+  const mailOptions = {
+    from: process.env.EMAIL_USERNAME,
+    to: userEmail,
+    subject: 'Order Confirmation',
+    text: `Your order has been placed successfully. Order ID: ${order._id}`
+  };
+
+  await transporter.sendMail(mailOptions);
 }
+
 
 // Get all orders for a user
 exports.getOrdersByUserId = async (req, res) => {
@@ -50,8 +136,8 @@ exports.getOrdersByUserId = async (req, res) => {
       .populate("items.product");
     res.json(orders);
   } catch (err) {
-    console.error("Error fetching orders by user ID:", err);
-    res.status(500).json({ message: err.message });
+    console.error("Error fetching orders by user ID:", err.message);
+    res.status(500).json({ message: "Internal server error." });
   }
 };
 
@@ -64,91 +150,93 @@ exports.getOrderById = async (req, res) => {
     if (order) {
       res.json(order);
     } else {
-      res.status(404).json({ message: "Order not found" });
+      res.status(404).json({ message: "Order not found." });
     }
   } catch (err) {
-    console.error("Error fetching order by ID:", err);
-    res.status(500).json({ message: err.message });
+    console.error("Error fetching order by ID:", err.message);
+    res.status(500).json({ message: "Internal server error." });
   }
 };
 
-// Create an order from a cart with Cash on Delivery (COD) support
-exports.createOrder = async (req, res) => {
-  console.log("Received request to create order:", req.body); // Log the incoming request data
+// // Create an order with payment and stock validation
+// exports.createOrder = async (req, res) => {
+//   const { userId, shippingAddress, paymentMethod, totalAmount, paymentDetails } = req.body;
 
-  const { userId, shippingAddress, paymentMethod, totalAmount } = req.body;
+//   try {
+//     const cart = await Cart.findOne({ user: userId }).populate("items.product");
+//     if (!cart || cart.items.length === 0) {
+//       return res.status(400).json({ message: "Cart is empty or not found." });
+//     }
 
-  try {
-    const cart = await Cart.findOne({ user: userId }).populate("items.product");
-    if (!cart) {
-      console.error("Cart not found for user:", userId);
-      return res.status(404).json({ message: "Cart not found" });
-    }
+//     // Stock validation
+//     for (const item of cart.items) {
+//       if (!item.product || item.product.stock < item.quantity) {
+//         return res.status(400).json({
+//           message: `Not enough stock for product: ${item.product ? item.product.name : "unknown"}`,
+//         });
+//       }
+//     }
 
-    const validItems = cart.items.filter((item) => item.product !== null);
+//     // Process payment for non-COD orders
+//     if (paymentMethod !== "COD") {
+//       try {
+//         await processPayment(totalAmount, paymentDetails);
+//       } catch (err) {
+//         return res.status(500).json({ message: "Payment failed." });
+//       }
+//     }
 
-    if (validItems.length === 0) {
-      console.error("No valid products in cart for user:", userId);
-      return res.status(400).json({ message: "No valid products in cart" });
-    }
+//     // Create the order
+//     const order = new Order({
+//       user: userId,
+//       items: cart.items.map(item => ({
+//         product: item.product._id,
+//         quantity: item.quantity,
+//         price: item.product.price,
+//       })),
+//       shippingAddress,
+//       paymentMethod,
+//       totalAmount,
+//       status: paymentMethod === "COD" ? "Pending" : "Paid",
+//     });
 
-    const order = new Order({
-      user: userId,
-      items: validItems.map((item) => ({
-        product: item.product._id,
-        quantity: item.quantity,
-        price: item.product.price,
-      })),
-      shippingAddress,
-      paymentMethod,
-      totalAmount,
-      status: paymentMethod === "COD" ? "Pending" : "Paid",
-    });
+//     await order.save();
 
-    await order.save();
-    console.log("Order saved successfully:", order);
+//     // Decrement stock for products
+//     for (const item of order.items) {
+//       const product = await Product.findById(item.product);
+//       product.stock -= item.quantity;
+//       await product.save();
+//     }
 
-    // Decrease stock quantity for each product in the order
-    for (const item of order.items) {
-      const product = await Product.findById(item.product);
-      if (product) {
-        console.log(
-          `Updating stock for product: ${product.name}, current stock: ${product.stock}, order quantity: ${item.quantity}`
-        );
-        product.stock -= item.quantity; // Decrease the stock
-        await product.save();
-        console.log(
-          `New stock for product: ${product.name} is ${product.stock}`
-        );
-      } else {
-        console.warn(`Product not found for item: ${item.product}`);
-      }
-    }
+//     // Clear the cart after order creation
+//     await Cart.findOneAndUpdate({ user: userId }, { items: [] });
 
-    // Optionally, delete the cart after order creation
-    await Cart.findOneAndDelete({ user: userId });
+//     // Send order confirmation email
+//     const user = await User.findById(userId);
+//     await sendOrderConfirmationEmail(user.email, order);
 
-    res.status(201).json(order);
-  } catch (err) {
-    console.error("Error creating order:", err);
-    res.status(500).json({ message: err.message });
-  }
-};
+//     res.status(201).json(order);
+//   } catch (err) {
+//     console.error("Error creating order:", err.message);
+//     res.status(500).json({ message: "Internal server error." });
+//   }
+// };
 
 // Update order status
 exports.updateOrderStatus = async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);
     if (!order) {
-      return res.status(404).json({ message: "Order not found" });
+      return res.status(404).json({ message: "Order not found." });
     }
 
     order.status = req.body.status || order.status;
     await order.save();
     res.json(order);
   } catch (err) {
-    console.error("Error updating order status:", err);
-    res.status(500).json({ message: err.message });
+    console.error("Error updating order status:", err.message);
+    res.status(500).json({ message: "Internal server error." });
   }
 };
 
@@ -160,22 +248,22 @@ exports.getAllOrders = async (req, res) => {
       .populate("items.product");
     res.json(orders);
   } catch (err) {
-    console.error("Error fetching all orders:", err);
-    res.status(500).json({ message: err.message });
+    console.error("Error fetching all orders:", err.message);
+    res.status(500).json({ message: "Internal server error." });
   }
 };
 
-// Delete an order by ID
+// Delete an order
 exports.deleteOrder = async (req, res) => {
   try {
     const order = await Order.findByIdAndDelete(req.params.id);
     if (!order) {
-      return res.status(404).json({ message: "Order not found" });
+      return res.status(404).json({ message: "Order not found." });
     }
-    res.json({ message: "Order deleted successfully" });
+    res.json({ message: "Order deleted successfully." });
   } catch (err) {
-    console.error("Error deleting order:", err);
-    res.status(500).json({ message: err.message });
+    console.error("Error deleting order:", err.message);
+    res.status(500).json({ message: "Internal server error." });
   }
 };
 
@@ -184,7 +272,7 @@ exports.updateOrderDetails = async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);
     if (!order) {
-      return res.status(404).json({ message: "Order not found" });
+      return res.status(404).json({ message: "Order not found." });
     }
 
     if (req.body.status) {
@@ -201,7 +289,7 @@ exports.updateOrderDetails = async (req, res) => {
     await order.save();
     res.json(order);
   } catch (err) {
-    console.error("Error updating order details:", err);
-    res.status(500).json({ message: err.message });
+    console.error("Error updating order details:", err.message);
+    res.status(500).json({ message: "Internal server error." });
   }
 };
