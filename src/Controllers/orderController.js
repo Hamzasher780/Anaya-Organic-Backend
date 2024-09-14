@@ -24,7 +24,7 @@ const bodyParser = require('body-parser');
 exports.createOrder = async (req, res) => {
   try {
     const { userId, paymentMethod, totalAmount, shippingAddress, buyNowProductId } = req.body;
-    
+
     // Check if shippingAddress exists
     if (!shippingAddress) {
       return res.status(400).json({ message: 'Shipping address is required.' });
@@ -70,7 +70,7 @@ exports.createOrder = async (req, res) => {
     const order = new Order({
       user: userId,
       items: items,
-      shippingAddress: shippingAddress, // Parsed as JSON object
+      shippingAddress: shippingAddress,
       paymentMethod,
       totalAmount,
       status: paymentMethod === 'COD' ? 'Pending' : 'Paid',
@@ -88,6 +88,12 @@ exports.createOrder = async (req, res) => {
     // Clear the cart if it's a cart checkout
     if (!buyNowProductId) {
       await Cart.findOneAndUpdate({ user: userId }, { items: [] });
+    }
+
+    // Send email confirmation
+    const user = await User.findById(userId);
+    if (user) {
+      await sendOrderConfirmationEmail(user.email, order);
     }
 
     res.status(201).json(order);
@@ -112,13 +118,13 @@ async function sendOrderConfirmationEmail(userEmail, order) {
   const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
-      user: process.env.EMAIL_USERNAME,
-      pass: process.env.EMAIL_PASSWORD
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
     }
   });
 
   const mailOptions = {
-    from: process.env.EMAIL_USERNAME,
+    from: process.env.EMAIL_USER,
     to: userEmail,
     subject: 'Order Confirmation',
     text: `Your order has been placed successfully. Order ID: ${order._id}`
@@ -157,71 +163,6 @@ exports.getOrderById = async (req, res) => {
     res.status(500).json({ message: "Internal server error." });
   }
 };
-
-// // Create an order with payment and stock validation
-// exports.createOrder = async (req, res) => {
-//   const { userId, shippingAddress, paymentMethod, totalAmount, paymentDetails } = req.body;
-
-//   try {
-//     const cart = await Cart.findOne({ user: userId }).populate("items.product");
-//     if (!cart || cart.items.length === 0) {
-//       return res.status(400).json({ message: "Cart is empty or not found." });
-//     }
-
-//     // Stock validation
-//     for (const item of cart.items) {
-//       if (!item.product || item.product.stock < item.quantity) {
-//         return res.status(400).json({
-//           message: `Not enough stock for product: ${item.product ? item.product.name : "unknown"}`,
-//         });
-//       }
-//     }
-
-//     // Process payment for non-COD orders
-//     if (paymentMethod !== "COD") {
-//       try {
-//         await processPayment(totalAmount, paymentDetails);
-//       } catch (err) {
-//         return res.status(500).json({ message: "Payment failed." });
-//       }
-//     }
-
-//     // Create the order
-//     const order = new Order({
-//       user: userId,
-//       items: cart.items.map(item => ({
-//         product: item.product._id,
-//         quantity: item.quantity,
-//         price: item.product.price,
-//       })),
-//       shippingAddress,
-//       paymentMethod,
-//       totalAmount,
-//       status: paymentMethod === "COD" ? "Pending" : "Paid",
-//     });
-
-//     await order.save();
-
-//     // Decrement stock for products
-//     for (const item of order.items) {
-//       const product = await Product.findById(item.product);
-//       product.stock -= item.quantity;
-//       await product.save();
-//     }
-
-//     // Clear the cart after order creation
-//     await Cart.findOneAndUpdate({ user: userId }, { items: [] });
-
-//     // Send order confirmation email
-//     const user = await User.findById(userId);
-//     await sendOrderConfirmationEmail(user.email, order);
-
-//     res.status(201).json(order);
-//   } catch (err) {
-//     console.error("Error creating order:", err.message);
-//     res.status(500).json({ message: "Internal server error." });
-//   }
-// };
 
 // Update order status
 exports.updateOrderStatus = async (req, res) => {
